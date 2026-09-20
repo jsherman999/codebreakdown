@@ -6,6 +6,18 @@ DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/Codebreakdown"
 
+# bootout may return before launchd finishes removing the previous service.
+start_service() {
+  for attempt in {1..10}; do
+    if launchctl bootstrap "$DOMAIN" "$PLIST"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo 'Could not start the LaunchAgent; inspect launchctl status and logs.' >&2
+  return 1
+}
+
 case "${1:-status}" in
   install)
     NODE_BIN="$(command -v node)"
@@ -47,7 +59,7 @@ PY
       launchctl bootout "$DOMAIN/$LABEL"
     fi
     launchctl enable "$DOMAIN/$LABEL"
-    launchctl bootstrap "$DOMAIN" "$PLIST"
+    start_service
     echo "Installed $LABEL on port $PORT."
     ;;
   restart)
@@ -57,7 +69,7 @@ PY
     launchctl bootout "$DOMAIN/$LABEL"
     ;;
   start)
-    launchctl bootstrap "$DOMAIN" "$PLIST"
+    start_service
     ;;
   status)
     launchctl print "$DOMAIN/$LABEL"
