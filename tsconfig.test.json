@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target":"ES2022", "module":"CommonJS", "moduleResolution":"node", "outDir":".test-build", "rootDir":".", "strict":true, "skipLibCheck":true, "esModuleInterop":true,
+    "lib":["ES2022","DOM"], "types":["node"], "noEmit":false
+  },
+  "include":["lib/types.ts","lib/server.ts","lib/providers.ts","lib/analysis.ts","lib/repository.ts","app/api/**/*.ts"]
+}

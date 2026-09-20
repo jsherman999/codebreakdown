@@ -1,13 +1,16 @@
 'use client';
 
+import Link from 'next/link';
+import { flushSync } from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
-import { ArrowRight, BookOpen, Check, ChevronLeft, ChevronRight, Code2, FileCode2, Files, FolderOpen, GitBranch, Github, KeyRound, Layers3, LoaderCircle, Pause, Play, RotateCcw, Sparkles, Upload, Volume2, VolumeX, X } from 'lucide-react';
+import { ArrowRight, BookOpen, Check, ChevronLeft, ChevronRight, Code2, FileCode2, Files, FolderOpen, GitBranch, GitFork, KeyRound, Layers3, LoaderCircle, Pause, Play, RotateCcw, Sparkles, Upload, Volume2, VolumeX, X } from 'lucide-react';
 import { demoAnalysis, demoFiles } from '../lib/demo';
 import { detectProvider, MAX_FILE_BYTES, MAX_FILES, type Analysis, type Provider, type SourceFile } from '../lib/types';
 
-async function api(endpoint: string, data: unknown, signal?: AbortSignal) {
+async function api<T = Analysis & { models: {id:string;name:string}[]; content: string; error?: string; files: SourceFile[]; repo: {owner:string;name:string;ref:string} }>(endpoint: string, data: unknown, signal?: AbortSignal) {
   const response = await fetch(`/api/${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data), signal });
-  const result = await response.json();
+  if (signal?.aborted) throw new DOMException('Aborted','AbortError');
+  const result = await response.json() as T & {error?: string};
   if (!response.ok) throw new Error(result.error || 'Request failed.');
   return result;
 }
@@ -65,6 +68,26 @@ export default function Home() {
     return () => { if (timer) clearTimeout(timer); window.speechSynthesis?.cancel(); };
   }, [playing, active, voice, speed, step, analysis]);
   useEffect(() => () => requestRef.current?.abort(), []);
+  useEffect(() => {
+    const context=(document as Document & {modelContext?:{registerTool:(tool:unknown,options:{signal:AbortSignal})=>void|Promise<void>}}).modelContext;
+    if(!context?.registerTool)return;
+    const lifecycle=new AbortController();
+    try {
+      void Promise.resolve(context.registerTool({
+        name:'select_walkthrough_block',title:'Select walkthrough block',
+        description:'Select an existing explanation block and highlight its source. This does not call a provider or send data.',
+        inputSchema:{type:'object',properties:{index:{type:'integer',minimum:1}},required:['index'],additionalProperties:false},
+        annotations:{readOnlyHint:false,untrustedContentHint:true},
+        execute(input:unknown){
+          const index=(input as {index?:unknown})?.index;
+          if(typeof index!=='number'||!Number.isInteger(index)||index<1||index>(analysis?.steps.length||0))throw new Error('Invalid walkthrough block.');
+          flushSync(()=>{setActive(index-1);setPlaying(false);});
+          return {index,title:analysis!.steps[index-1].title};
+        },
+      },{signal:lifecycle.signal})).catch(()=>{});
+    } catch { /* WebMCP is optional. */ }
+    return ()=>lifecycle.abort();
+  },[analysis]);
 
   function credentialsChanged(value: string, nextProvider?: Provider | '') {
     requestRef.current?.abort(); setBusy(''); setKey(value);
@@ -122,12 +145,16 @@ export default function Home() {
   }
   async function loadFiles(list: FileList | null) {
     if (!list?.length) return;
-    await perform('Reading files', async () => {
+    await perform('Reading files', async signal => {
+      if (Array.from(list).reduce((sum,f)=>sum+f.size,0)>12_000_000) throw new Error('Choose files totaling no more than 12 MB.');
       if (list.length > MAX_FILES) throw new Error(`Choose at most ${MAX_FILES} files.`);
       const imported: SourceFile[]=[];
       for (const f of Array.from(list)) {
         if (f.size > MAX_FILE_BYTES) throw new Error(`${f.name} exceeds the 120 KB file limit.`);
-        const content = await f.text();
+        const bytes = await f.arrayBuffer();
+        if (signal.aborted) throw new DOMException('Aborted','AbortError');
+        let content: string;
+        try { content = new TextDecoder('utf-8',{fatal:true}).decode(bytes); } catch { throw new Error(`${f.name} is not UTF-8 text.`); }
         if (content.includes('\0')) throw new Error(`${f.name} is a binary file. Choose text or source files.`);
         imported.push({path:f.webkitRelativePath || f.name,content});
       }
@@ -151,7 +178,7 @@ export default function Home() {
 
   return <main className="app-shell">
     <header className="topbar">
-      <a className="brand" href="/" aria-label="Codebreakdown home"><span className="brand-icon"><Code2 size={23}/></span><span>code<span className="brand-light">breakdown</span><span className="brand-dot">.</span></span></a>
+      <Link className="brand" href="/" aria-label="Codebreakdown home"><span className="brand-icon"><Code2 size={23}/></span><span>code<span className="brand-light">breakdown</span><span className="brand-dot">.</span></span></Link>
       <div className="top-actions"><span className="workspace-label">WORKSPACE / 01</span><button className="quiet guide-button" onClick={()=>setGuide(true)}><BookOpen size={16}/>Guide</button></div>
     </header>
     <section className="connection-bar" aria-label="Model connection">
@@ -163,7 +190,7 @@ export default function Home() {
       <span className="session-status"><i className={connected?'online':''}/>{connected?'Connected':'Not connected'}</span>
     </section>
     <section className="source-bar" aria-label="Code input">
-      <label className="repo-field"><span>GitHub repository</span><div className="input-icon"><Github size={17}/><input aria-label="GitHub repository" value={repoUrl} onChange={e=>setRepoUrl(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!busy)void loadRepository();}} placeholder="github.com / owner / repository"/><button aria-label="Load repository" onClick={loadRepository} disabled={!!busy}><ArrowRight size={18}/></button></div></label>
+      <label className="repo-field"><span>GitHub repository</span><div className="input-icon"><GitFork size={17}/><input aria-label="GitHub repository" value={repoUrl} onChange={e=>setRepoUrl(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!busy)void loadRepository();}} placeholder="github.com / owner / repository"/><button aria-label="Load repository" onClick={loadRepository} disabled={!!busy}><ArrowRight size={18}/></button></div></label>
       <div className="source-or">/</div>
       <button className="outline source-button" disabled={!!busy} onClick={()=>uploadRef.current?.click()}><Upload size={16}/>Upload files</button>
       <button className="icon-button outline source-button" title="Browse folder" aria-label="Browse folder" disabled={!!busy} onClick={()=>folderRef.current?.click()}><FolderOpen size={18}/></button>
@@ -200,7 +227,7 @@ export default function Home() {
           {analysis?.summary&&<div className="walkthrough-intro"><span className="eyebrow">{question&&!demo?'FOCUSED ANSWER':'THE BIG PICTURE'}</span><p>{analysis.summary}</p></div>}
           {analysis?.steps.map((s,index)=><button ref={index===active?activeTextRef:undefined} key={`${s.path||s.startLine}-${index}`} className={`narration-card ${index===active?'active':''}`} onClick={()=>move(index)} aria-current={index===active?'step':undefined}><span className="step-heading"><span className="step-number">{String(index+1).padStart(2,'0')}</span><span className="step-location">{selected?`LINES ${s.startLine}–${s.endLine}`:s.path}</span>{index===active&&<span className="active-dot"/>}</span><h2>{s.title}</h2><p>{s.explanation}</p></button>)}
           {!analysis?.steps.length&&!busy&&<div className="empty-state"><Sparkles size={28}/><span>Ready to analyze</span></div>}
-          {!!busy&&<div className="busy-state" role="status"><LoaderCircle className="spin" size={20}/>{busy}</div>}
+          {!!busy&&<output className="busy-state"><LoaderCircle className="spin" size={20}/>{busy}</output>}
         </div>
         <div className="playback">
           <div className="progress-track"><div style={{width:`${analysis?.steps.length?((active+1)/analysis.steps.length)*100:0}%`}}/></div>
@@ -208,7 +235,7 @@ export default function Home() {
         </div>
       </section>
     </section>
-    <footer className="question-bar"><div className="question-label"><Sparkles size={17}/><label htmlFor="question">Question <span>optional</span></label></div><textarea id="question" value={question} onChange={e=>setQuestion(e.target.value)} rows={1} aria-label="Question (optional)"/><button className="analyze-button" disabled={!!busy} onClick={()=>{setDemo(false);void runAnalysis();}}>{busy?<LoaderCircle size={17} className="spin"/>:<Sparkles size={17}/>}Analyze<ArrowRight size={17}/></button>{!!busy&&<button className="quiet" onClick={()=>{requestRef.current?.abort();setBusy('');}}>Cancel</button>}</footer>
-    <dialog ref={dialogRef} onCancel={()=>setGuide(false)} onClick={e=>{if(e.target===e.currentTarget)setGuide(false);}} className="guide-dialog"><div className="guide-header"><span><BookOpen size={20}/>Guide</span><button className="icon-button" aria-label="Close guide" onClick={()=>setGuide(false)}><X size={20}/></button></div><div className="guide-content"><h2>Read code. See the connections.</h2><p>Codebreakdown turns source code into a guided, block-by-block explanation. The initial example is a prerecorded demo; your files are analyzed with your chosen model.</p><h3>1. Connect a model</h3><p>Enter an OpenAI, Anthropic, or Google Gemini API key. Recognizable prefixes select the provider; choose it manually for ambiguous keys. Connect loads the provider’s live model list. Select a model before analyzing.</p><h3>2. Choose your code</h3><p>Import a public GitHub repository, upload text files, or browse a local folder. A repository opens with an overview of every file’s likely role, inferred from its path. Select a file to read its actual code and generate a walkthrough. Uploads are read locally; press Analyze to send the selected file or generate a file overview.</p><h3>3. Follow the walkthrough</h3><p>Leave Question empty for a complete file explanation. Enter a question to focus on specific behavior. Select an explanation block to highlight its source lines. Play moves through the blocks; enable the speaker for browser narration. Change playback speed or move forward and back at any time.</p><h3>Data & limits</h3><p>Keys and code are kept in page memory, never local storage or an app database. Your key passes through this app’s server to the selected provider. Analysis sends selected code, file paths, and your question to that provider and may incur charges. Provider retention policies apply. Refreshing clears your session. Browser speech may use your operating system’s speech service.</p><p>Public repositories only, default branch, up to 1,500 files. File overviews use names, not contents, and can be wrong. Text files are limited to 120 KB; full-file analysis is divided into bounded sections when necessary. Binary files are not analyzed. AI explanations are not proof of correctness.</p><h3>Sandbox test runs</h3><p>A future Test run can generate tests, execute them in an isolated environment, and connect observed results to source lines. This version does not execute uploaded code. See the README for the proposed sandbox design and limits.</p></div></dialog>
+    <footer className="question-bar"><div className="question-label"><Sparkles size={17}/><label htmlFor="question">Question <span>optional</span></label></div><textarea id="question" value={question} onChange={e=>setQuestion(e.target.value)} rows={1} aria-label="Question (optional)"/><button className="analyze-button" disabled={!!busy} onClick={()=>{if(connected&&model){setDemo(false);void runAnalysis();}else setError('Connect an API key and select a model.');}}>{busy?<LoaderCircle size={17} className="spin"/>:<Sparkles size={17}/>}Analyze<ArrowRight size={17}/></button>{!!busy&&<button className="quiet" onClick={()=>{requestRef.current?.abort();setBusy('');}}>Cancel</button>}</footer>
+    <dialog ref={dialogRef} onCancel={()=>setGuide(false)} className="guide-dialog"><div className="guide-header"><span><BookOpen size={20}/>Guide</span><button className="icon-button" aria-label="Close guide" onClick={()=>setGuide(false)}><X size={20}/></button></div><div className="guide-content"><h2>Read code. See the connections.</h2><p>Codebreakdown turns source code into a guided, block-by-block explanation. The initial example is a prerecorded demo; your files are analyzed with your chosen model.</p><h3>1. Connect a model</h3><p>Enter an OpenAI, Anthropic, or Google Gemini API key. Recognizable prefixes select the provider; choose it manually for ambiguous keys. Connect loads the provider’s live model list. Select a model before analyzing.</p><h3>2. Choose your code</h3><p>Import a public GitHub repository, upload text files, or browse a local folder. A repository opens with an overview of every file’s likely role, inferred from its path. Select a file to read its actual code and generate a walkthrough. Uploads are read locally; press Analyze to send the selected file or generate a file overview.</p><h3>3. Follow the walkthrough</h3><p>Leave Question empty for a complete file explanation. Enter a question to focus on specific behavior. Select an explanation block to highlight its source lines. Play moves through the blocks; enable the speaker for browser narration. Change playback speed or move forward and back at any time.</p><h3>Data & limits</h3><p>Keys and code are kept in page memory, never local storage or an app database. Your key passes through this app’s server to the selected provider. Analysis sends selected code, file paths, and your question to that provider and may incur charges. Provider retention policies apply. Refreshing clears your session. Browser speech may use your operating system’s speech service.</p><p>Public repositories only, default branch, up to 1,500 files. File overviews use names, not contents, and can be wrong. Text files are limited to 120 KB; full-file analysis is divided into bounded sections when necessary. Binary files are not analyzed. AI explanations are not proof of correctness.</p><h3>Sandbox test runs</h3><p>A future Test run can generate tests, execute them in an isolated environment, and connect observed results to source lines. This version does not execute uploaded code. See the README for the proposed sandbox design and limits.</p></div></dialog>
   </main>;
 }

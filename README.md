@@ -1,27 +1,96 @@
 # Codebreakdown
 
-A web workspace for guided code explanations. Bring an LLM API key, import code, and follow synchronized source highlights and explanation blocks.
+A focused web app for understanding code. Connect an LLM API key, import a repository or local source files, and follow a walkthrough with synchronized translucent source highlights and explanation blocks.
 
-## Development
+## Run locally
 
-Requires Node.js 22.13 or later.
+Requires Node.js 22.13 or later and npm.
 
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 
-The app uses React, TypeScript, Vinext, and Cloudflare Workers through Sites. The interface includes a prerecorded example walkthrough. Live provider and repository endpoints are being added in the next implementation change.
+Open the local URL printed by the server. No server-side LLM key or database is required. Each user supplies their own key in the app. The initial workspace contains a clearly marked, prerecorded example; it works without credentials.
 
-## Interaction
+```sh
+npm test          # API and validation tests using mocked upstream services
+npm run lint
+npx tsc --noEmit
+npm run build     # Cloudflare Worker + browser assets
+npm start         # Serve the production build with Wrangler
+```
 
-- Connect an API key, choose its provider, and load its model list.
-- Import a GitHub repository, upload text files, or select a folder.
-- Repository mode describes each file's role before opening individual source files.
-- Leave the question empty for a whole-file explanation, or ask a focused question.
-- Click blocks or use playback, previous/next, speed, and optional spoken narration.
-- The Guide contains usage details; the workspace keeps explanatory UI copy minimal.
+## Use
 
-## Test run feasibility
+1. Enter an API key. Recognizable prefixes detect OpenAI, Anthropic, or Google Gemini; select the provider manually for ambiguous keys. Click **Connect** to retrieve live models, then select a model.
+2. Enter a public GitHub repository URL and use the arrow, upload one or more text files, or browse a folder.
+3. Repository imports open a file-by-file overview and automatically analyze it if a model is connected. Otherwise, connect and press **Analyze**. Each entry describes the file's likely role and relationships, **inferred from its path**, without reading its contents. Binary assets and configuration files also receive overview entries.
+4. Select a file to fetch its contents and generate its code explanation. For uploaded files, press **Analyze** after import. The **Overview** entry returns to the existing file map; Analyze regenerates it using the current question.
+5. Leave **Question** empty to explain the complete file. A question focuses the walkthrough on relevant behavior. Click explanation blocks to highlight source lines, or use play/pause, previous/next, restart, speed, and optional spoken narration.
+6. **Guide** opens all usage explanations; the main workspace uses small field labels and controls.
 
-Sandbox execution is planned separately from static explanation. A credible test run needs an isolated execution service, resource and network limits, a reproducible environment, generated tests, and actual captured results. Uploaded code must never execute on the application server. This version does not run uploaded code.
+## Providers
+
+| Provider | Detection | Discovery | Analysis |
+| --- | --- | --- | --- |
+| OpenAI | `sk-proj-`, `sk-svcacct-`; manual for legacy or ambiguous keys | Live `/v1/models`, text model filter | Responses API, `store: false` |
+| Anthropic | `sk-ant-` | Paginated `/v1/models` | Messages API |
+| Google Gemini | `AIza` | Paginated `/v1beta/models`, `generateContent` filter | Generate Content API |
+
+Key prefixes are hints, not authentication or proof of ownership. The app never probes multiple providers with the same key. Connect validates only the explicitly selected provider. Model discovery does not guarantee sufficient billing quota, generation permissions, context capacity, or JSON reliability. Unsupported or incomplete generations produce errors rather than fabricated walkthroughs. The provider list is intentionally limited to these three; arbitrary custom endpoints are not accepted.
+
+Official API references: [OpenAI model discovery](https://developers.openai.com/api/reference/resources/models/methods/list), [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [Anthropic models](https://platform.claude.com/docs/en/api/models/list), [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create), [Gemini models](https://ai.google.dev/api/models), [Gemini generation](https://ai.google.dev/api/generate-content).
+
+## Behavior and limits
+
+- Public GitHub repositories only, repository-root URLs, default branch. Imports pin blob hashes, so later branch changes do not change selected file content. GitHub API rate limits apply; the app does not accept a GitHub token or access private repos. See [GitHub tree API](https://docs.github.com/en/rest/git/trees).
+- Up to **1,500 files** per workspace; complete repository trees only. Truncated or larger repositories are rejected explicitly instead of silently skipping files. Git submodules are not traversed.
+- **120 KB per UTF-8 text file**, **12 MB per local import**, and **4,000 characters per question**. Binary/non-UTF-8 files cannot be analyzed. Request bodies and upstream responses are bounded to protect memory.
+- Overview requests run in batches of 40 paths. Every requested file must appear exactly once. Overviews use path metadata; they are useful navigation aids, not content-grounded reviews.
+- Large files split into sections of about 20,000 characters or 250 lines, preserving absolute line numbers. Each section receives repository paths and earlier section summaries. Every line must be covered in whole-file mode; focused answers may select subsets. Multi-section requests cost more and can hit provider or platform timeouts. Very long individual lines remain intact.
+- Analysis knows the selected file and repository paths, not other files' contents. Cross-file relationships are inferred unless visible in the selected source. It does not claim to resolve a complete dependency graph.
+- Playback follows the selected blocks. With voice enabled, the browser's speech synthesis advances on utterance completion; otherwise a reading timer advances the walkthrough. Speech availability and voices depend on the browser/OS. No audio files are stored.
+- Cancel stops the app request; a provider may still finish processing or bill an already accepted request. Partial repository batches and partial file analyses are not presented as complete results.
+- Analysis is AI-generated and can be wrong, even when its structure validates. Generated strings are rendered as text, never HTML. Uploaded source is never executed.
+
+## Privacy and security
+
+Keys, file contents, and analyses stay in browser memory and transient request memory, with no local storage, cookies owned by the app, or app database persistence. Refreshing clears the workspace. The app uses same-origin POST endpoints; the server forwards a key only to the selected provider's fixed HTTPS endpoint. Secrets are not placed in URLs, logs, or error messages. Do not add request-body logging at the reverse proxy.
+
+The selected provider receives source code, repository paths, and the question. Its billing and retention policies apply; `store: false` is not a promise of zero provider retention. The operating system's speech service may receive explanation text. Sites hosting can use its own sign-in session. Only import code you intend to share with the selected provider, and avoid including credentials in source files.
+
+The private Sites deployment is owner-only by default. If deploying publicly, add authenticated sessions, per-user request limits, and abuse controls first. There is no app-level authentication or distributed rate limiting in the source; an internet-facing public proxy would allow abuse of the GitHub endpoint even without an LLM key.
+
+## Architecture
+
+- `app/page.tsx`, `app/globals.css`: React workspace, file explorer, source rendering, narration, and Guide.
+- `app/api/models`: live provider discovery.
+- `app/api/repository`: public GitHub tree and pinned blob retrieval.
+- `app/api/analyze`: file and repository orchestration.
+- `lib/providers.ts`: fixed-endpoint provider adapters.
+- `lib/analysis.ts`: output validation and source chunking.
+- `lib/server.ts`: bounded requests/responses and safe errors.
+- `tests/core.test.mjs`: meaningful adapter, route, input-limit, and output-contract tests with mocked upstreams; no paid model calls.
+
+Stack: React 19, TypeScript, Vinext/Vite, Cloudflare Workers, Lucide icons, and the Sites scaffold with shadcn tooling. `.openai/hosting.json` identifies the private Sites project. The GitHub origin remains the user's repository.
+
+An optional, feature-detected WebMCP `select_walkthrough_block` tool uses the same visible selection state. It exposes no key and makes no provider requests. It is not required for normal use. Registration and execution need a supported WebMCP browser; that browser-specific contract has not been verified in this environment.
+
+## “Test run” feasibility and proposed design
+
+**Feasible, but not implemented in this version.** Static explanation and actual execution should be visibly distinct. An LLM predicting a result is not a test run.
+
+A useful first implementation would support small Python and JavaScript/TypeScript projects, pure functions, and existing test suites. General repositories can depend on databases, credentials, native libraries, GPUs, operating systems, or external APIs; many cannot be reproduced automatically. Report those as unsupported or incomplete rather than passed.
+
+Proposed flow:
+
+1. Inspect manifests and existing tests without executing installation hooks. The model proposes a test plan with inputs, assertions, runtime, dependencies, and explicit assumptions.
+2. Show the plan and commands for the user to start. Copy only chosen code into a new disposable sandbox, excluding all LLM keys and application secrets.
+3. Provision an isolated Linux VM or a comparably isolated execution service. Apply CPU, memory, disk, output, wall-clock, and concurrency caps. Deny network by default; use controlled dependency retrieval when explicitly needed. Never mount the host filesystem or Docker socket.
+4. Run real tests, capture exit status/stdout/stderr, and retain the exact tests and runtime versions. Bound the output and destroy the environment on completion, error, cancellation, or timeout.
+5. Ask the model to explain the observed results. Link stack traces, assertions, and coverage locations to the existing source/highlight panels. Distinguish **Passed**, **Failed**, **Timed out**, **Unsupported**, and **Not run**. Passing tests support only the tested assertions.
+
+A managed service such as [E2B](https://docs.e2b.dev/sandbox) supplies isolated Linux VMs and lifecycle controls. [Cloudflare Sandbox SDK](https://developers.cloudflare.com/sandbox/) is another execution-oriented option; the current ordinary Worker is not a general-purpose process sandbox. Either needs separate service provisioning, credentials/billing, runtime configuration, and cleanup guarantees. The LLM key alone does not provision execution infrastructure.
+
+Recommended first scope: one language/runtime at a time, existing tests first, then generated edge-case tests; no automatic dependency installation from untrusted scripts. Implement an execution-service adapter behind a job queue with a server-owned credential, expiring job records, and streaming logs. Add authentication and cost limits before sharing access. Do not run arbitrary uploaded code with `eval`, a browser iframe, Node `vm`, or a process on the application server and call it securely sandboxed.
