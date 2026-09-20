@@ -489,6 +489,7 @@ export default function Home() {
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
             <option value="gemini">Google Gemini</option>
+            <option value="openrouter">OpenRouter</option>
           </select>
         </label>
         <button
@@ -902,10 +903,10 @@ export default function Home() {
           </p>
           <h3>1. Connect a model</h3>
           <p>
-            Enter an OpenAI, Anthropic, or Google Gemini API key. Recognizable
-            prefixes select the provider; choose it manually for ambiguous keys.
-            Connect loads the provider’s live model list. Select a model before
-            analyzing.
+            Enter an OpenAI, Anthropic, Google Gemini, or OpenRouter API key.
+            Recognizable prefixes select the provider; choose it manually for
+            ambiguous keys. Connect loads the provider’s live model list. Select
+            a model before analyzing.
           </p>
           <h3>2. Choose your code</h3>
           <p>
@@ -929,8 +930,9 @@ export default function Home() {
             database. Your key passes through this app’s server to the selected
             provider. Analysis sends selected code, file paths, and your
             question to that provider and may incur charges. Provider retention
-            policies apply. Refreshing clears your session. Browser speech may
-            use your operating system’s speech service.
+            policies apply. OpenRouter routes the analysis to its selected
+            upstream provider. Refreshing clears your session. Browser speech
+            may use your operating system’s speech service.
           </p>
           <p>
             Public repositories only, default branch, up to 1,500 files. File

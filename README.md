@@ -23,7 +23,7 @@ npm start         # Serve the production build with Wrangler
 
 ## Use
 
-1. Enter an API key. Recognizable prefixes detect OpenAI, Anthropic, or Google Gemini; select the provider manually for ambiguous keys. Click **Connect** to retrieve live models, then select a model.
+1. Enter an API key. Recognizable prefixes detect OpenAI, Anthropic, Google Gemini, or OpenRouter; select the provider manually for ambiguous keys. Click **Connect** to retrieve live models, then select a model.
 2. Enter a public GitHub repository URL and use the arrow, upload one or more text files, or browse a folder.
 3. Repository imports open a file-by-file overview and automatically analyze it if a model is connected. Otherwise, connect and press **Analyze**. Each entry describes the file's likely role and relationships, **inferred from its path**, without reading its contents. Binary assets and configuration files also receive overview entries.
 4. Select a file to fetch its contents and generate its code explanation. For uploaded files, press **Analyze** after import. The **Overview** entry returns to the existing file map; Analyze regenerates it using the current question.
@@ -32,15 +32,20 @@ npm start         # Serve the production build with Wrangler
 
 ## Providers
 
-| Provider      | Detection                                                      | Discovery                                            | Analysis                      |
-| ------------- | -------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------- |
-| OpenAI        | `sk-proj-`, `sk-svcacct-`; manual for legacy or ambiguous keys | Live `/v1/models`, text model filter                 | Responses API, `store: false` |
-| Anthropic     | `sk-ant-`                                                      | Paginated `/v1/models`                               | Messages API                  |
-| Google Gemini | `AIza`                                                         | Paginated `/v1beta/models`, `generateContent` filter | Generate Content API          |
+| Provider      | Detection                                                      | Discovery                                                                | Analysis                      |
+| ------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------- |
+| OpenAI        | `sk-proj-`, `sk-svcacct-`; manual for legacy or ambiguous keys | Live `/v1/models`, text model filter                                     | Responses API, `store: false` |
+| Anthropic     | `sk-ant-`                                                      | Paginated `/v1/models`                                                   | Messages API                  |
+| Google Gemini | `AIza`                                                         | Paginated `/v1beta/models`, `generateContent` filter                     | Generate Content API          |
+| OpenRouter    | `sk-or-v1-`                                                    | Key validation via `/api/v1/key`; text models from `/api/v1/models/user` | Chat Completions API          |
 
-Key prefixes are hints, not authentication or proof of ownership. The app never probes multiple providers with the same key. Connect validates only the explicitly selected provider. Model discovery does not guarantee sufficient billing quota, generation permissions, context capacity, or JSON reliability. Unsupported or incomplete generations produce errors rather than fabricated walkthroughs. The provider list is intentionally limited to these three; arbitrary custom endpoints are not accepted.
+Key prefixes are hints, not authentication or proof of ownership. The app never probes multiple providers with the same key. Connect validates only the explicitly selected provider. Model discovery does not guarantee sufficient billing quota, generation permissions, context capacity, or JSON reliability. Unsupported or incomplete generations produce errors rather than fabricated walkthroughs. The provider list is intentionally limited to these four; arbitrary custom endpoints are not accepted.
 
 Official API references: [OpenAI model discovery](https://developers.openai.com/api/reference/resources/models/methods/list), [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [Anthropic models](https://platform.claude.com/docs/en/api/models/list), [Anthropic Messages](https://platform.claude.com/docs/en/api/messages/create), [Gemini models](https://ai.google.dev/api/models), [Gemini generation](https://ai.google.dev/api/generate-content).
+
+OpenRouter model discovery respects the account’s provider preferences and includes compatible free and paid models. Namespaced model IDs and `:free` variants are supported. OpenRouter receives the request and routes code to the chosen upstream model provider; both services’ policies apply. A valid key does not guarantee credits or access to every model.
+
+OpenRouter references: [key validation](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key), [account-filtered model discovery](https://openrouter.ai/docs/api/api-reference/models/list-models-filtered-by-user-provider-preferences-privacy-settings-and-guardrails), [completion format](https://openrouter.ai/docs/api/reference/overview).
 
 ## Behavior and limits
 

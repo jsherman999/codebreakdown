@@ -397,3 +397,138 @@ test('outbound requests use Worker-compatible manual redirects and never follow 
     /Provider request failed/,
   );
 });
+
+test('OpenRouter prefix is detected without sending the key to OpenAI', () => {
+  assert.equal(detectProvider('sk-or-v1-example'), 'openrouter');
+});
+
+test('OpenRouter authenticates before listing account-filtered text models', async () => {
+  const urls = [];
+  global.fetch = async (url, init) => {
+    urls.push(url);
+    assert.equal(init.headers.Authorization, 'Bearer sk-or-v1-test');
+    if (url.endsWith('/key')) return Response.json({ data: { label: 'test' } });
+    return Response.json({
+      data: [
+        {
+          id: 'vendor/model:free',
+          name: 'Free text',
+          architecture: {
+            input_modalities: ['text'],
+            output_modalities: ['text'],
+          },
+        },
+        {
+          id: 'vendor/vision',
+          name: 'Vision and text',
+          architecture: {
+            input_modalities: ['text', 'image'],
+            output_modalities: ['text'],
+          },
+        },
+        {
+          id: 'vendor/image',
+          name: 'Image',
+          architecture: {
+            input_modalities: ['text'],
+            output_modalities: ['image'],
+          },
+        },
+        {
+          id: 'vendor/audio',
+          name: 'Audio input',
+          architecture: {
+            input_modalities: ['audio'],
+            output_modalities: ['text'],
+          },
+        },
+      ],
+    });
+  };
+  const response = await models(
+    req({ provider: 'openrouter', key: 'sk-or-v1-test' }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    (await response.json()).models.map((m) => m.id),
+    ['vendor/model:free', 'vendor/vision'],
+  );
+  assert.deepEqual(urls, [
+    'https://openrouter.ai/api/v1/key',
+    'https://openrouter.ai/api/v1/models/user',
+  ]);
+});
+
+test('OpenRouter rejects an invalid key before fetching its model catalog', async () => {
+  let calls = 0;
+  global.fetch = async (url) => {
+    calls++;
+    assert.equal(url, 'https://openrouter.ai/api/v1/key');
+    return new Response('private secret', { status: 401 });
+  };
+  const response = await models(
+    req({ provider: 'openrouter', key: 'sk-or-v1-invalid' }),
+  );
+  assert.equal(response.status, 401);
+  assert.equal(calls, 1);
+  assert.doesNotMatch(await response.text(), /private secret/);
+});
+
+test('OpenRouter file analysis accepts namespaced free-model IDs and parses chat completions', async () => {
+  global.fetch = async (url, init) => {
+    assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions');
+    assert.equal(init.headers.Authorization, 'Bearer test-secret');
+    const payload = JSON.parse(init.body);
+    assert.equal(payload.model, 'vendor/model-v1.2:free');
+    assert.equal(payload.stream, false);
+    assert.match(payload.messages[0].content, /Explain ALL lines/);
+    return Response.json({
+      choices: [
+        { finish_reason: 'stop', message: { content: JSON.stringify(answer) } },
+      ],
+    });
+  };
+  const response = await analyze(
+    req({
+      ...credentials,
+      provider: 'openrouter',
+      model: 'vendor/model-v1.2:free',
+      mode: 'file',
+      file: { path: 'a.js', content: 'function one() {\nreturn 1;\n}' },
+    }),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), answer);
+});
+
+test('OpenRouter rejects incomplete and embedded-error responses and reports credit failures safely', async () => {
+  for (const response of [
+    { choices: [{ finish_reason: 'length', message: { content: 'partial' } }] },
+    {
+      choices: [
+        { finish_reason: 'content_filter', message: { content: 'partial' } },
+      ],
+    },
+    { error: { code: 502, message: 'raw private content' } },
+    {
+      choices: [
+        {
+          finish_reason: 'stop',
+          error: { code: 502 },
+          message: { content: 'partial' },
+        },
+      ],
+    },
+  ]) {
+    global.fetch = async () => Response.json(response);
+    await assert.rejects(
+      generate('openrouter', 'secret', 'vendor/model', 'prompt'),
+    );
+  }
+  global.fetch = async () =>
+    new Response('raw private credit error', { status: 402 });
+  await assert.rejects(
+    generate('openrouter', 'secret', 'vendor/model', 'prompt'),
+    /credits are insufficient/,
+  );
+});

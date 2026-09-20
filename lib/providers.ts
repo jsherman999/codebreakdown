@@ -13,6 +13,7 @@ type Model = {
   display_name?: string;
   displayName?: string;
   supportedGenerationMethods?: string[];
+  architecture?: { input_modalities?: string[]; output_modalities?: string[] };
 };
 type ProviderResponse = {
   data?: Model[];
@@ -22,12 +23,19 @@ type ProviderResponse = {
   nextPageToken?: string;
   status?: string;
   stop_reason?: string;
+  error?: { code?: number };
+  choices?: {
+    finish_reason?: string;
+    error?: { code?: number };
+    message?: { content?: string | Part[] | null };
+  }[];
   output?: Part[];
   content?: Part[];
   candidates?: { finishReason?: string; content?: { parts?: Part[] } }[];
 };
 const bases = {
   openai: 'https://api.openai.com/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
   anthropic: 'https://api.anthropic.com/v1',
   gemini: 'https://generativelanguage.googleapis.com/v1beta',
 };
@@ -47,6 +55,15 @@ export async function listModels(
   key: string,
   signal?: AbortSignal,
 ) {
+  if (provider === 'openrouter') {
+    // Validate separately: a public model catalog is not proof that a key works.
+    const validation = await upstream(
+      `${bases.openrouter}/key`,
+      { headers: headers(provider, key) },
+      signal,
+    );
+    await validation.body?.cancel();
+  }
   const models: { id: string; name: string }[] = [];
   let cursor = '';
   for (let page = 0; page < 20; page++) {
@@ -57,13 +74,23 @@ export async function listModels(
           ? `?pageSize=100${cursor ? `&pageToken=${encodeURIComponent(cursor)}` : ''}`
           : '';
     const r = await upstream(
-      `${bases[provider]}/models${query}`,
+      `${bases[provider]}/models${provider === 'openrouter' ? '/user' : ''}${query}`,
       { headers: headers(provider, key) },
       signal,
     );
-    const data = await readJson<ProviderResponse>(r);
+    const data = await readJson<ProviderResponse>(
+      r,
+      provider === 'openrouter' ? 8_000_000 : 2_000_000,
+    );
     for (const m of data.data || data.models || []) {
-      if (provider === 'gemini') {
+      if (provider === 'openrouter') {
+        if (
+          m.architecture?.input_modalities?.includes('text') &&
+          m.architecture.output_modalities?.includes('text')
+        ) {
+          models.push({ id: m.id, name: m.name || m.id });
+        }
+      } else if (provider === 'gemini') {
         if (
           m.supportedGenerationMethods?.includes('generateContent') &&
           !/image|tts|robotics|embedding/i.test(m.name)
@@ -110,6 +137,14 @@ export async function generate(
   if (provider === 'openai') {
     endpoint = '/responses';
     payload = { model, input: prompt, max_output_tokens: 12000, store: false };
+  } else if (provider === 'openrouter') {
+    endpoint = '/chat/completions';
+    payload = {
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 8192,
+      stream: false,
+    };
   } else if (provider === 'anthropic') {
     endpoint = '/messages';
     payload = {
@@ -149,6 +184,33 @@ export async function generate(
       .filter((x: Part) => x.type === 'output_text')
       .map((x: Part) => x.text || '')
       .join('');
+  } else if (provider === 'openrouter') {
+    const choice = data.choices?.[0];
+    if (data.error || choice?.error)
+      throw new AppError(
+        'OpenRouter could not complete the request. Check credits or choose another model.',
+        502,
+      );
+    if (choice?.finish_reason === 'length')
+      throw new AppError(
+        'The model ran out of output space. Try another model or a smaller file.',
+        422,
+      );
+    if (choice?.finish_reason && choice.finish_reason !== 'stop')
+      throw new AppError(
+        'The model did not complete its response. Try another model or a smaller file.',
+        422,
+      );
+    const content = choice?.message?.content;
+    text =
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter((p) => p.type === 'text')
+              .map((p) => p.text || '')
+              .join('')
+          : '';
   } else if (provider === 'anthropic') {
     if (data.stop_reason === 'max_tokens')
       throw new AppError(

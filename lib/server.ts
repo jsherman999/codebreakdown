@@ -78,7 +78,11 @@ export function credentials(data: Record<string, unknown>): {
   provider: Provider;
 } {
   const key = string(data.key, 'API key', 500).trim();
-  if (!['openai', 'anthropic', 'gemini'].includes(String(data.provider)))
+  if (
+    !['openai', 'anthropic', 'gemini', 'openrouter'].includes(
+      String(data.provider),
+    )
+  )
     throw new AppError('Select a supported provider.');
   if (/[\r\n]/.test(key)) throw new AppError('Invalid API key.');
   return { key, provider: data.provider as Provider };
@@ -103,6 +107,11 @@ export async function upstream(
       throw new AppError(
         'Access denied. Check your API key, provider, and model permissions.',
         401,
+      );
+    if (response.status === 402)
+      throw new AppError(
+        'Provider credits are insufficient. Check your account balance or choose a lower-cost model.',
+        402,
       );
     if (response.status === 429)
       throw new AppError(

@@ -18,7 +18,9 @@ export async function POST(request: Request) {
     const data = await body(request);
     const { key, provider } = credentials(data);
     const model = string(data.model, 'model', 200);
-    if (!/^[\w.:-]+$/.test(model))
+    const modelPattern =
+      provider === 'openrouter' ? /^[\w.:-]+(?:\/[\w.:-]+)*$/ : /^[\w.:-]+$/;
+    if (!modelPattern.test(model))
       throw new AppError('Invalid model identifier.');
     const question =
       data.question === undefined
