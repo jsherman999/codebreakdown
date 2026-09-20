@@ -94,3 +94,28 @@ Proposed flow:
 A managed service such as [E2B](https://docs.e2b.dev/sandbox) supplies isolated Linux VMs and lifecycle controls. [Cloudflare Sandbox SDK](https://developers.cloudflare.com/sandbox/) is another execution-oriented option; the current ordinary Worker is not a general-purpose process sandbox. Either needs separate service provisioning, credentials/billing, runtime configuration, and cleanup guarantees. The LLM key alone does not provision execution infrastructure.
 
 Recommended first scope: one language/runtime at a time, existing tests first, then generated edge-case tests; no automatic dependency installation from untrusted scripts. Implement an execution-service adapter behind a job queue with a server-owned credential, expiring job records, and streaming logs. Add authentication and cost limits before sharing access. Do not run arbitrary uploaded code with `eval`, a browser iframe, Node `vm`, or a process on the application server and call it securely sandboxed.
+
+## macOS launchd and LAN access
+
+Install the built app as a per-user LaunchAgent:
+
+```sh
+./launchd/control.sh install
+./launchd/control.sh status
+./launchd/control.sh logs
+```
+
+The installer builds the app, discovers the local Node executable, and writes `~/Library/LaunchAgents/com.jay.codebreakdown.plist`. It starts immediately, starts again when you log in, and restarts on unexpected exits. This is a user login service; it does not run while logged out, and the Mac must be awake for LAN access.
+
+The app listens on **all network interfaces, port 8788**, using the built Cloudflare Worker and static assets in Wrangler's local runtime. No cloud service or Cloudflare login is needed to serve it. The debugging listener is restricted to loopback. On this Mac, use `http://jmini.local:8788` from another device on the same LAN, or the Mac's current LAN IP if that device does not resolve `.local` names.
+
+This local instance has no login and uses HTTP. Devices that can reach the port can use it; API keys and code sent across the LAN are not transport-encrypted. Use a trusted LAN and do not forward this port to the internet. The private hosted Sites instance has separate access controls.
+
+```sh
+./launchd/control.sh restart
+./launchd/control.sh stop
+./launchd/control.sh start
+./launchd/control.sh uninstall
+```
+
+Logs are in `~/Library/Logs/Codebreakdown/`. After code changes, run `./launchd/control.sh install` again to rebuild and restart. To change ports, reinstall with `CODEBREAKDOWN_PORT=8789 ./launchd/control.sh install`. Keep the project directory and its dependencies in place; the service runs from this checkout. If the macOS firewall prompts for Node or the Worker runtime, allow incoming connections for LAN access.
