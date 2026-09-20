@@ -32,11 +32,11 @@ npm start         # Serve the production build with Wrangler
 
 ## Providers
 
-| Provider | Detection | Discovery | Analysis |
-| --- | --- | --- | --- |
-| OpenAI | `sk-proj-`, `sk-svcacct-`; manual for legacy or ambiguous keys | Live `/v1/models`, text model filter | Responses API, `store: false` |
-| Anthropic | `sk-ant-` | Paginated `/v1/models` | Messages API |
-| Google Gemini | `AIza` | Paginated `/v1beta/models`, `generateContent` filter | Generate Content API |
+| Provider      | Detection                                                      | Discovery                                            | Analysis                      |
+| ------------- | -------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------- |
+| OpenAI        | `sk-proj-`, `sk-svcacct-`; manual for legacy or ambiguous keys | Live `/v1/models`, text model filter                 | Responses API, `store: false` |
+| Anthropic     | `sk-ant-`                                                      | Paginated `/v1/models`                               | Messages API                  |
+| Google Gemini | `AIza`                                                         | Paginated `/v1beta/models`, `generateContent` filter | Generate Content API          |
 
 Key prefixes are hints, not authentication or proof of ownership. The app never probes multiple providers with the same key. Connect validates only the explicitly selected provider. Model discovery does not guarantee sufficient billing quota, generation permissions, context capacity, or JSON reliability. Unsupported or incomplete generations produce errors rather than fabricated walkthroughs. The provider list is intentionally limited to these three; arbitrary custom endpoints are not accepted.
 
