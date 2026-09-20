@@ -90,7 +90,8 @@ export async function upstream(
 ) {
   const response = await fetch(url, {
     ...init,
-    redirect: 'error',
+    redirect: 'manual',
+    cache: 'no-store',
     signal: signal
       ? AbortSignal.any([signal, AbortSignal.timeout(90_000)])
       : AbortSignal.timeout(90_000),

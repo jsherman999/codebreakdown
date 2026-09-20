@@ -382,3 +382,18 @@ test('oversized upstream payloads are stopped before parsing', async () => {
     /size limit/,
   );
 });
+
+test('outbound requests use Worker-compatible manual redirects and never follow a credential redirect', async () => {
+  global.fetch = async (url, init) => {
+    assert.equal(init.redirect, 'manual');
+    assert.equal(init.cache, 'no-store');
+    return new Response(null, {
+      status: 302,
+      headers: { Location: 'https://untrusted.example' },
+    });
+  };
+  await assert.rejects(
+    listModels('openai', 'secret'),
+    /Provider request failed/,
+  );
+});
