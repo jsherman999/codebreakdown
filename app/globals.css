@@ -953,8 +953,20 @@ svg {
     border-left: 0;
     border-top: 1px solid var(--line);
   }
+  .code-lines {
+    padding: 12px 0 24px;
+  }
   .code-line {
-    font-size: 13px;
+    font-size: 0.625rem;
+    line-height: 1.0625rem;
+    min-height: 1.0625rem;
+    letter-spacing: 0;
+    padding-right: 12px;
+  }
+  .line-number {
+    width: 30px;
+    padding-right: 8px;
+    font-size: 0.5625rem;
   }
   .question-bar {
     margin: 16px 14px;
@@ -980,11 +992,26 @@ svg {
     padding: 0 12px;
   }
   .narration-scroll {
-    padding: 20px;
+    padding: 12px;
+  }
+  .walkthrough-intro {
+    padding-bottom: 14px;
+  }
+  .walkthrough-intro p {
+    margin-top: 8px;
+  }
+  .narration-card {
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .narration-card h2 {
+    font-size: 0.875rem;
+    margin: 8px 0 6px;
   }
   .narration-card p,
   .walkthrough-intro p {
-    font-size: 16px;
+    font-size: 0.875rem;
+    line-height: 1.6;
   }
   .playback-controls {
     gap: 12px;
