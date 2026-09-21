@@ -1035,3 +1035,148 @@ svg {
     animation-duration: 0.01ms !important;
   }
 }
+
+.repo-introduction {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  background: #1c241a;
+  max-height: 48%;
+  overflow: auto;
+  flex-shrink: 0;
+}
+.intro-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: #b7cf9d;
+}
+.intro-heading > span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.repo-introduction p {
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  margin: 12px 0;
+}
+.repo-introduction output {
+  display: block;
+  padding: 14px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.usage-panel {
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  background: #16191e;
+}
+.usage-panel summary {
+  flex-wrap: wrap;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #c2d5b2;
+}
+.usage-panel summary:before {
+  content: '▸';
+}
+.usage-panel[open] summary:before {
+  content: '▾';
+}
+.usage-panel summary > span:first-child {
+  margin-right: auto;
+}
+.usage-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--muted);
+}
+.usage-totals b {
+  font-weight: 500;
+  color: var(--text);
+}
+.usage-request {
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.usage-request > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.usage-request dl {
+  margin: 8px 0;
+}
+.usage-request dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 5px 0;
+}
+.usage-request dt {
+  color: var(--muted);
+}
+.usage-request dd {
+  margin: 0;
+  text-align: right;
+}
+.analysis-history {
+  font-size: 12px;
+  margin-bottom: 15px;
+}
+.analysis-history > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding-bottom: 8px;
+}
+.analysis-history > div {
+  margin-top: 8px;
+}
+.analysis-history > div > span {
+  display: block;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+.usage-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.usage-settings input {
+  width: 100%;
+}
+@media (max-width: 800px) {
+  .repo-introduction {
+    padding: 10px 12px;
+    max-height: 50%;
+  }
+  .repo-introduction p {
+    font-size: 0.6875rem;
+    line-height: 1.5;
+  }
+  .intro-heading,
+  .usage-panel,
+  .analysis-history {
+    font-size: 0.625rem;
+  }
+  .usage-panel {
+    padding: 6px 8px;
+    margin-bottom: 8px;
+  }
+  .usage-request > div {
+    font-size: 0.625rem;
+  }
+}

@@ -113,7 +113,7 @@ export function splitSource(content: string) {
     text = '';
   for (let i = 0; i < lines.length; i++) {
     const line = `${i + 1}: ${lines[i]}\n`;
-    if (text && (text.length + line.length > 20000 || i - start >= 249)) {
+    if (text && (text.length + line.length > 10000 || i - start >= 119)) {
       chunks.push({ start, end: i, text });
       start = i + 1;
       text = '';

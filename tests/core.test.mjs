@@ -1,4 +1,4 @@
-import { test, afterEach } from 'node:test';
+import { test, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectProvider } from '../.test-build/lib/types.js';
 import {
@@ -12,8 +12,16 @@ import { POST as analyze } from '../.test-build/app/api/analyze/route.js';
 import { POST as models } from '../.test-build/app/api/models/route.js';
 import { POST as repository } from '../.test-build/app/api/repository/route.js';
 const nativeFetch = global.fetch;
+const nativeInfo = console.info,
+  nativeError = console.error;
+beforeEach(() => {
+  console.info = () => {};
+  console.error = () => {};
+});
 afterEach(() => {
   global.fetch = nativeFetch;
+  console.info = nativeInfo;
+  console.error = nativeError;
 });
 const answer = {
   summary: 'A function.',
@@ -213,7 +221,10 @@ test('file analysis route runs the complete source through the provider and vali
     }),
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), answer);
+  const result = await response.json();
+  assert.deepEqual({ summary: result.summary, steps: result.steps }, answer);
+  assert.equal(result.usage.length, 1);
+  assert.equal(typeof result.requestId, 'string');
   assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 test('question mode focuses its prompt and permits relevant subsets', async () => {
@@ -370,7 +381,7 @@ test('truncated model responses are rejected instead of shown as complete', asyn
     Response.json({ status: 'incomplete', output: [] });
   await assert.rejects(
     generate('openai', 'secret', 'gpt-test', 'prompt'),
-    /output space/,
+    /output cap/,
   );
 });
 
@@ -498,7 +509,10 @@ test('OpenRouter file analysis accepts namespaced free-model IDs and parses chat
     }),
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), answer);
+  const result = await response.json();
+  assert.deepEqual({ summary: result.summary, steps: result.steps }, answer);
+  assert.equal(result.usage.length, 1);
+  assert.equal(typeof result.requestId, 'string');
 });
 
 test('OpenRouter rejects incomplete and embedded-error responses and reports credit failures safely', async () => {
@@ -531,4 +545,407 @@ test('OpenRouter rejects incomplete and embedded-error responses and reports cre
     generate('openrouter', 'secret', 'vendor/model', 'prompt'),
     /credits are insufficient/,
   );
+});
+
+test('provider usage normalization includes caches and reasoning without double-counting', async () => {
+  const { normalizeUsage } = await import('../.test-build/lib/usage.js');
+  const openai = normalizeUsage(
+    'openai',
+    'm',
+    {
+      usage: {
+        input_tokens: 100,
+        output_tokens: 40,
+        total_tokens: 140,
+        input_tokens_details: { cached_tokens: 20 },
+        output_tokens_details: { reasoning_tokens: 10 },
+      },
+    },
+    {
+      contextWindow: 1000,
+      pricing: { input: 0.000002, output: 0.000006, cachedInput: 0.000001 },
+    },
+    500,
+    'completed',
+  );
+  assert.equal(openai.totalTokens, 140);
+  assert.equal(openai.availableTokens, 860);
+  assert.equal(openai.reasoningTokens, 10);
+  assert.ok(Math.abs(openai.costUsd - 0.00042) < 1e-10);
+  const claude = normalizeUsage(
+    'anthropic',
+    'm',
+    {
+      usage: {
+        input_tokens: 50,
+        cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 20,
+        output_tokens: 10,
+      },
+    },
+    { inputLimit: 200 },
+    100,
+    'end_turn',
+  );
+  assert.equal(claude.inputTokens, 100);
+  assert.equal(claude.totalTokens, 110);
+  assert.equal(claude.availableTokens, 100);
+  assert.equal(claude.capacityKind, 'input');
+  const gemini = normalizeUsage(
+    'gemini',
+    'm',
+    {
+      usageMetadata: {
+        promptTokenCount: 100,
+        candidatesTokenCount: 30,
+        thoughtsTokenCount: 20,
+        totalTokenCount: 150,
+        cachedContentTokenCount: 10,
+      },
+    },
+    { inputLimit: 1000 },
+    500,
+    'STOP',
+  );
+  assert.equal(gemini.outputTokens, 50);
+  assert.equal(gemini.totalTokens, 150);
+  assert.equal(gemini.availableTokens, 900);
+});
+
+test('reported zero cost stays zero while missing prices and counts stay unknown', async () => {
+  const { normalizeUsage, usageTotals } =
+    await import('../.test-build/lib/usage.js');
+  const free = normalizeUsage(
+    'openrouter',
+    'm',
+    {
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        cost: 0,
+      },
+    },
+    {},
+    100,
+    'stop',
+  );
+  const unknown = normalizeUsage('openrouter', 'm', {}, {}, 100, 'stop');
+  assert.equal(free.costUsd, 0);
+  assert.equal(free.costSource, 'reported');
+  assert.equal(unknown.costUsd, null);
+  assert.equal(unknown.totalTokens, null);
+  assert.equal(usageTotals([free, unknown]).costUsd, null);
+  assert.equal(usageTotals([free, free]).totalTokens, 30);
+});
+
+test('OpenRouter discovery preserves live limits and prices including free prices', async () => {
+  global.fetch = async (url) =>
+    Response.json(
+      url.endsWith('/key')
+        ? { data: {} }
+        : {
+            data: [
+              {
+                id: 'vendor/free',
+                name: 'Free',
+                architecture: {
+                  input_modalities: ['text'],
+                  output_modalities: ['text'],
+                },
+                context_length: 16000,
+                top_provider: { max_completion_tokens: 2048 },
+                pricing: { prompt: '0', completion: '0' },
+              },
+            ],
+          },
+    );
+  const result = await listModels('openrouter', 'secret');
+  assert.equal(result[0].contextWindow, 16000);
+  assert.equal(result[0].outputLimit, 2048);
+  assert.deepEqual(result[0].pricing, { input: 0, output: 0 });
+});
+
+test('generation respects model output limits and reports usage even when output is truncated', async () => {
+  const records = [];
+  global.fetch = async (url, init) => {
+    assert.equal(JSON.parse(init.body).max_tokens, 2048);
+    return Response.json({
+      choices: [{ finish_reason: 'length', message: { content: 'partial' } }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 2048,
+        total_tokens: 2148,
+        cost: 0.02,
+      },
+    });
+  };
+  await assert.rejects(
+    generate('openrouter', 'secret', 'vendor/model', 'prompt', undefined, {
+      metadata: { contextWindow: 16000, outputLimit: 2048 },
+      onUsage: (u) => records.push(u),
+    }),
+    (e) => e.code === 'output_limit',
+  );
+  assert.equal(records.length, 1);
+  assert.equal(records[0].costUsd, 0.02);
+  assert.equal(records[0].outputTokens, 2048);
+});
+
+test('repository introduction uses the requested prompt and supplied source evidence', async () => {
+  global.fetch = async (url, init) => {
+    const prompt = JSON.parse(init.body).messages[0].content;
+    assert.match(
+      prompt,
+      /read and understand this repo\/app\. describe it in clear terms, what it does, what it is\./,
+    );
+    assert.match(prompt, /This app tracks bicycles/);
+    assert.match(prompt, /bounded sample/);
+    return Response.json({
+      choices: [
+        {
+          finish_reason: 'stop',
+          message: {
+            content: JSON.stringify({
+              summary: 'A bicycle tracking application.',
+            }),
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        total_tokens: 120,
+        cost: 0.001,
+      },
+    });
+  };
+  const response = await analyze(
+    req({
+      ...credentials,
+      provider: 'openrouter',
+      model: 'vendor/model',
+      mode: 'intro',
+      paths: ['README.md', 'app.ts'],
+      sources: [{ path: 'README.md', content: 'This app tracks bicycles.' }],
+    }),
+  );
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.summary, 'A bicycle tracking application.');
+  assert.deepEqual(result.sources, ['README.md']);
+  assert.equal(result.omittedFiles, 1);
+  assert.equal(result.usage[0].costUsd, 0.001);
+});
+
+test('intro source selection prioritizes docs and entry points and omits secret files', async () => {
+  const { selectIntroFiles } = await import('../.test-build/lib/intro.js');
+  const files = [
+    '.env',
+    'secrets.json',
+    'README.md',
+    'package.json',
+    'src/main.ts',
+    'docs/guide.md',
+    'src/helper.ts',
+    'dist/index.js',
+  ].map((path) => ({ path, size: 100 }));
+  assert.deepEqual(
+    selectIntroFiles(files).map((f) => f.path),
+    [
+      'README.md',
+      'package.json',
+      'src/main.ts',
+      'docs/guide.md',
+      'src/helper.ts',
+    ],
+  );
+});
+
+test('intro rejects unlisted source paths without contacting a provider', async () => {
+  global.fetch = () => {
+    throw new Error('Must not call');
+  };
+  const response = await analyze(
+    req({
+      ...credentials,
+      mode: 'intro',
+      paths: ['a'],
+      sources: [{ path: 'outside', content: 'data' }],
+    }),
+  );
+  assert.equal(response.status, 400);
+});
+
+test('analysis failure preserves usage and logs a diagnosis without source or API key', async () => {
+  const lines = [];
+  console.info = (s) => lines.push(s);
+  console.error = (s) => lines.push(s);
+  global.fetch = async () =>
+    Response.json({
+      choices: [
+        { finish_reason: 'length', message: { content: 'PRIVATE-SOURCE' } },
+      ],
+      usage: {
+        prompt_tokens: 123,
+        completion_tokens: 2048,
+        total_tokens: 2171,
+        cost: 0.02,
+      },
+    });
+  const response = await analyze(
+    req({
+      ...credentials,
+      key: 'PRIVATE-KEY',
+      provider: 'openrouter',
+      model: 'vendor/model',
+      mode: 'file',
+      modelInfo: { outputLimit: 2048 },
+      file: { path: 'PRIVATE-PATH', content: 'PRIVATE-SOURCE' },
+    }),
+  );
+  assert.equal(response.status, 422);
+  const result = await response.json();
+  assert.equal(result.code, 'output_limit');
+  assert.equal(result.usage[0].costUsd, 0.02);
+  const log = lines.join('\n');
+  assert.match(log, /analysis_failed/);
+  assert.match(log, /output_limit/);
+  assert.doesNotMatch(log, /PRIVATE-KEY|PRIVATE-SOURCE|PRIVATE-PATH/);
+});
+
+test('upstream context-limit errors are classified without echoing raw error text', async () => {
+  global.fetch = async () =>
+    Response.json(
+      {
+        error: {
+          code: 'context_length_exceeded',
+          message: 'PRIVATE-SOURCE is too long',
+        },
+      },
+      { status: 400 },
+    );
+  const response = await analyze(
+    req({ ...credentials, mode: 'file', file: { path: 'a', content: 'code' } }),
+  );
+  const result = await response.json();
+  assert.equal(response.status, 422);
+  assert.equal(result.code, 'context_limit');
+  assert.doesNotMatch(result.error, /PRIVATE-SOURCE/);
+});
+
+test('multi-section completed analyses retain usage from every request', async () => {
+  global.fetch = async (url, init) => {
+    const prompt = JSON.parse(init.body).input;
+    const match = prompt.match(/section (\d+)–(\d+) of/);
+    assert.ok(match);
+    return Response.json({
+      status: 'completed',
+      usage: { input_tokens: 20, output_tokens: 10, total_tokens: 30 },
+      output: [
+        {
+          content: [
+            {
+              type: 'output_text',
+              text: JSON.stringify({
+                summary: 'Section.',
+                steps: [
+                  {
+                    title: 'Section',
+                    explanation: 'Code.',
+                    startLine: Number(match[1]),
+                    endLine: Number(match[2]),
+                  },
+                ],
+              }),
+            },
+          ],
+        },
+      ],
+    });
+  };
+  const response = await analyze(
+    req({
+      ...credentials,
+      mode: 'file',
+      file: {
+        path: 'a',
+        content: Array.from({ length: 300 }, () => 'const x = 1;').join('\n'),
+      },
+    }),
+  );
+  const result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.usage.length, 3);
+  assert.equal(result.steps.at(-1).endLine, 300);
+});
+
+test('provider deadlines produce a distinct timeout diagnosis', async () => {
+  const { upstream } = await import('../.test-build/lib/server.js');
+  global.fetch = async (url, init) =>
+    new Promise((resolve, reject) =>
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), {
+        once: true,
+      }),
+    );
+  const keepAlive = setInterval(() => {}, 20);
+  try {
+    await assert.rejects(
+      upstream('https://example.test', {}, undefined, 5),
+      (e) => e.code === 'timeout' && e.status === 504,
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test('unknown model metadata remains unknown and invalid overrides are discarded', async () => {
+  const { sanitizeModelInfo } = await import('../.test-build/lib/usage.js');
+  assert.deepEqual(
+    sanitizeModelInfo({
+      contextWindow: -1,
+      inputLimit: NaN,
+      outputLimit: Infinity,
+      pricing: { input: -2, output: 1 },
+    }),
+    {},
+  );
+  assert.deepEqual(
+    sanitizeModelInfo({
+      contextWindow: 32000,
+      outputLimit: 2048,
+      pricing: { input: 0, output: 0 },
+    }),
+    {
+      contextWindow: 32000,
+      outputLimit: 2048,
+      pricing: { input: 0, output: 0 },
+    },
+  );
+});
+
+test('invalid walkthrough structure retains returned usage for cost reporting', async () => {
+  global.fetch = async () =>
+    Response.json({
+      choices: [{ finish_reason: 'stop', message: { content: 'not-json' } }],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        cost: 0.001,
+      },
+    });
+  const response = await analyze(
+    req({
+      ...credentials,
+      provider: 'openrouter',
+      model: 'vendor/model',
+      mode: 'file',
+      file: { path: 'a', content: 'code' },
+    }),
+  );
+  const result = await response.json();
+  assert.equal(response.status, 422);
+  assert.equal(result.code, 'invalid_response');
+  assert.equal(result.usage[0].costUsd, 0.001);
 });

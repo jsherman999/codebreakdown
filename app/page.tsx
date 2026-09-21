@@ -28,6 +28,8 @@ import {
   X,
 } from 'lucide-react';
 import { demoAnalysis, demoFiles } from '../lib/demo';
+import { UsagePanel } from '../components/usage-panel';
+import { selectIntroFiles } from '../lib/intro';
 import {
   detectProvider,
   MAX_FILE_BYTES,
@@ -35,11 +37,24 @@ import {
   type Analysis,
   type Provider,
   type SourceFile,
+  type ModelInfo,
+  type Usage,
+  type RepoIntro,
+  REPOSITORY_BATCH_SIZE,
 } from '../lib/types';
+
+class ApiError extends Error {
+  constructor(
+    message: string,
+    public usage: Usage[] = [],
+  ) {
+    super(message);
+  }
+}
 
 async function api<
   T = Analysis & {
-    models: { id: string; name: string }[];
+    models: ModelInfo[];
     content: string;
     error?: string;
     files: SourceFile[];
@@ -53,8 +68,13 @@ async function api<
     signal,
   });
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-  const result = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(result.error || 'Request failed.');
+  const result = (await response.json()) as T & {
+    error?: string;
+    usage?: Usage[];
+  };
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  if (!response.ok)
+    throw new ApiError(result.error || 'Request failed.', result.usage || []);
   return result;
 }
 
@@ -92,7 +112,7 @@ function Syntax({ text }: { text: string }) {
 export default function Home() {
   const [key, setKey] = useState('');
   const [provider, setProvider] = useState<Provider | ''>('');
-  const [models, setModels] = useState<{ id: string; name: string }[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [model, setModel] = useState('');
   const [connected, setConnected] = useState(false);
   const [repoUrl, setRepoUrl] = useState('');
@@ -106,6 +126,13 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<Analysis | null>(demoAnalysis);
   const [overview, setOverview] = useState<Analysis | null>(null);
   const [question, setQuestion] = useState('');
+  const [repoIntro, setRepoIntro] = useState<RepoIntro | null>(null);
+  const [history, setHistory] = useState<{ label: string; usage: Usage[] }[]>(
+    [],
+  );
+  const [inputRate, setInputRate] = useState('');
+  const [outputRate, setOutputRate] = useState('');
+  const [contextOverride, setContextOverride] = useState('');
   const [demo, setDemo] = useState(true);
   const [active, setActive] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -215,11 +242,39 @@ export default function Home() {
     return () => lifecycle.abort();
   }, [analysis]);
 
+  function recordUsage(label: string, usage: Usage[]) {
+    setHistory((previous) => [{ label, usage }, ...previous].slice(0, 50));
+  }
+  function modelInfo() {
+    const info: Partial<ModelInfo> = { ...models.find((m) => m.id === model) };
+    if (
+      inputRate !== '' &&
+      outputRate !== '' &&
+      Number(inputRate) >= 0 &&
+      Number(outputRate) >= 0
+    )
+      info.pricing = {
+        input: Number(inputRate) / 1_000_000,
+        output: Number(outputRate) / 1_000_000,
+      };
+    if (contextOverride !== '' && Number(contextOverride) > 0)
+      info.contextWindow = Number(contextOverride);
+    return info;
+  }
+  function changeModel(value: string) {
+    setModel(value);
+    setInputRate('');
+    setOutputRate('');
+    setContextOverride('');
+  }
   function credentialsChanged(value: string, nextProvider?: Provider | '') {
     requestRef.current?.abort();
     setBusy('');
     setKey(value);
     setProvider(nextProvider ?? detectProvider(value.trim()));
+    setInputRate('');
+    setOutputRate('');
+    setContextOverride('');
     setConnected(false);
     setModels([]);
     setModel('');
@@ -238,8 +293,11 @@ export default function Home() {
     try {
       await work(controller.signal);
     } catch (e) {
-      if (!controller.signal.aborted)
+      if (!controller.signal.aborted) {
         setError(e instanceof Error ? e.message : 'Something went wrong.');
+        if (e instanceof ApiError && e.usage.length)
+          recordUsage(`Failed · ${label}`, e.usage);
+      }
     } finally {
       if (requestRef.current === controller) setBusy('');
     }
@@ -271,6 +329,8 @@ export default function Home() {
       setError('Connect an API key and select a model.');
       return;
     }
+    setAnalysis(null);
+    setActive(0);
     await perform(
       target ? 'Analyzing file' : 'Mapping files',
       async (signal) => {
@@ -302,43 +362,112 @@ export default function Home() {
               model,
               question: currentQuestion,
               mode: 'file',
+              modelInfo: modelInfo(),
               file: { path: target.path, content },
               paths: currentFiles.map((f) => f.path),
             },
             signal,
           );
           setSelected(target.path);
+          recordUsage(target.path, result.usage || []);
           showAnalysis(result);
         } else {
-          // Every path receives an overview entry, in bounded batches.
-          const steps: Analysis['steps'] = [];
-          let summary = '';
-          for (let i = 0; i < currentFiles.length; i += 40) {
-            setBusy(
-              `Mapping files · ${Math.min(i + 40, currentFiles.length)}/${currentFiles.length}`,
-            );
-            const result = await api(
+          if (currentRepo) {
+            setBusy('Reading repository');
+            setRepoIntro(null);
+            const sources: { path: string; content: string }[] = [];
+            for (const source of selectIntroFiles(currentFiles)) {
+              if (signal.aborted)
+                throw new DOMException('Aborted', 'AbortError');
+              try {
+                const loaded =
+                  source.content === undefined
+                    ? await api(
+                        'repository',
+                        {
+                          action: 'file',
+                          repo: currentRepo,
+                          path: source.path,
+                          sha: source.sha,
+                        },
+                        signal,
+                      )
+                    : source;
+                sources.push({
+                  path: source.path,
+                  content: (loaded.content || '').slice(0, 6000),
+                });
+              } catch (e) {
+                if (signal.aborted)
+                  throw e; /* Missing or non-text samples are omitted, not invented. */
+              }
+            }
+            setBusy('Understanding repository');
+            const introduction = await api<RepoIntro>(
               'analyze',
               {
                 key: key.trim(),
                 provider,
                 model,
-                question: currentQuestion,
-                mode: 'repository',
-                files: currentFiles
-                  .slice(i, i + 40)
-                  .map((f) => ({ path: f.path })),
+                modelInfo: modelInfo(),
+                mode: 'intro',
+                sources,
                 paths: currentFiles.map((f) => f.path),
               },
               signal,
             );
-            steps.push(...result.steps);
-            if (!summary) summary = result.summary;
+            setRepoIntro(introduction);
+            recordUsage('Repository introduction', introduction.usage || []);
           }
-          const result = { summary, steps };
-          setOverview(result);
+          // Show the introduction while subsequent file batches are scanned.
+          const steps: Analysis['steps'] = [];
+          const scanUsage: Usage[] = [];
+          let summary = '';
           setSelected(null);
+          try {
+            for (
+              let i = 0;
+              i < currentFiles.length;
+              i += REPOSITORY_BATCH_SIZE
+            ) {
+              setBusy(
+                `Scanning files · ${Math.min(i + REPOSITORY_BATCH_SIZE, currentFiles.length)}/${currentFiles.length}`,
+              );
+              const result = await api(
+                'analyze',
+                {
+                  key: key.trim(),
+                  provider,
+                  model,
+                  modelInfo: modelInfo(),
+                  question: currentQuestion,
+                  mode: 'repository',
+                  files: currentFiles
+                    .slice(i, i + REPOSITORY_BATCH_SIZE)
+                    .map((f) => ({ path: f.path })),
+                  paths: currentFiles.map((f) => f.path),
+                },
+                signal,
+              );
+              steps.push(...result.steps);
+              scanUsage.push(...(result.usage || []));
+              if (!summary) summary = result.summary;
+              const progress = {
+                summary,
+                steps: [...steps],
+                usage: [...scanUsage],
+              };
+              setOverview(progress);
+              setAnalysis(progress);
+            }
+          } catch (e) {
+            if (scanUsage.length) recordUsage('Partial file scan', scanUsage);
+            throw e;
+          }
+          const result = { summary, steps, usage: scanUsage };
+          setOverview(result);
           showAnalysis(result);
+          recordUsage('File scan', scanUsage);
         }
       },
     );
@@ -361,6 +490,7 @@ export default function Home() {
         signal,
       );
       if (!imported) return;
+      setRepoIntro(null);
       setRepo(imported.repo);
       setFiles(imported.files);
       setSelected(null);
@@ -401,6 +531,7 @@ export default function Home() {
           'Files must have unique paths. Use the folder picker for duplicate names.',
         );
       setFiles(imported);
+      setRepoIntro(null);
       setRepo(null);
       setDemo(false);
       setOverview(null);
@@ -507,7 +638,7 @@ export default function Home() {
             aria-label="Model"
             value={model}
             disabled={!models.length || !!busy}
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(e) => changeModel(e.target.value)}
           >
             <option value="">Select model</option>
             {models.map((m) => (
@@ -644,6 +775,38 @@ export default function Home() {
                 : `${files.length} files`}
             </span>
           </div>
+          {!selected && repo && (
+            <section
+              className="repo-introduction"
+              aria-label="Repository introduction"
+            >
+              <div className="intro-heading">
+                <span>
+                  <Sparkles size={15} />
+                  About this app
+                </span>
+                {repoIntro && (
+                  <span>
+                    Sources {repoIntro.sources.length}/{files.length}
+                  </span>
+                )}
+              </div>
+              {repoIntro ? (
+                <>
+                  <p>{repoIntro.summary}</p>
+                  <UsagePanel records={repoIntro.usage || []} />
+                </>
+              ) : (
+                <output>
+                  {busy === 'Understanding repository'
+                    ? 'Understanding repository…'
+                    : busy
+                      ? 'Reading repository…'
+                      : 'Connect a model and analyze'}
+                </output>
+              )}
+            </section>
+          )}
           <div className="code-scroll">
             {selected ? (
               <div className="code-lines">
@@ -713,6 +876,18 @@ export default function Home() {
             <span className="count">{analysis?.steps.length || 0} blocks</span>
           </div>
           <div className="narration-scroll">
+            {analysis?.usage && <UsagePanel records={analysis.usage} />}
+            {!!history.length && (
+              <details className="analysis-history">
+                <summary>Analyses · {history.length}</summary>
+                {history.map((entry, index) => (
+                  <div key={index}>
+                    <span>{entry.label}</span>
+                    <UsagePanel records={entry.usage} />
+                  </div>
+                ))}
+              </details>
+            )}
             {analysis?.summary && (
               <div className="walkthrough-intro">
                 <span className="eyebrow">
@@ -911,10 +1086,12 @@ export default function Home() {
           <h3>2. Choose your code</h3>
           <p>
             Import a public GitHub repository, upload text files, or browse a
-            local folder. A repository opens with an overview of every file’s
-            likely role, inferred from its path. Select a file to read its
-            actual code and generate a walkthrough. Uploads are read locally;
-            press Analyze to send the selected file or generate a file overview.
+            local folder. A repository first reads selected documentation,
+            manifests, and entry-point excerpts to describe the app. That
+            introduction remains visible while the file scan describes every
+            file’s likely role from its path. Select a file to read its actual
+            code and generate a walkthrough. Uploads are read locally; press
+            Analyze to send the selected file or generate a file overview.
           </p>
           <h3>3. Follow the walkthrough</h3>
           <p>
@@ -924,6 +1101,58 @@ export default function Home() {
             the speaker for browser narration. Change playback speed or move
             forward and back at any time.
           </p>
+          <h3>Usage & estimates</h3>
+          <p>
+            Each completed introduction, file scan, and file analysis reports
+            input/output tokens and cost. Expand Tokens for per-request
+            capacity, available context, output limits, reasoning, and cached
+            tokens. Context resets for each request; it is not your account
+            balance. Analyses keeps the latest 50 records in this page session.
+          </p>
+          <p>
+            OpenRouter supplies live prices and reported cost. Other providers
+            may omit prices or context limits; Unavailable means unknown.
+            Optional overrides below apply to the selected model until you
+            change it. Estimates use a simple input/output rate and may differ
+            from invoices, caching, tiers, or regional prices. Counts from
+            failed completed responses are retained; canceled or timed-out
+            requests may still be billed without returning usage.
+          </p>
+          <div className="usage-settings">
+            <label>
+              <span>Input $ / 1M tokens</span>
+              <input
+                aria-label="Input price per million tokens"
+                type="number"
+                min="0"
+                step="any"
+                value={inputRate}
+                onChange={(e) => setInputRate(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>Output $ / 1M tokens</span>
+              <input
+                aria-label="Output price per million tokens"
+                type="number"
+                min="0"
+                step="any"
+                value={outputRate}
+                onChange={(e) => setOutputRate(e.target.value)}
+              />
+            </label>
+            <label>
+              <span>Context tokens</span>
+              <input
+                aria-label="Context capacity override"
+                type="number"
+                min="1"
+                step="1"
+                value={contextOverride}
+                onChange={(e) => setContextOverride(e.target.value)}
+              />
+            </label>
+          </div>
           <h3>Data & limits</h3>
           <p>
             Keys and code are kept in page memory, never local storage or an app

@@ -4,6 +4,7 @@ export class AppError extends Error {
   constructor(
     message: string,
     public status = 400,
+    public code = 'request_error',
   ) {
     super(message);
   }
@@ -91,18 +92,48 @@ export async function upstream(
   url: string,
   init: RequestInit = {},
   signal?: AbortSignal,
+  timeoutMs = 90_000,
 ) {
+  const timeout = AbortSignal.timeout(timeoutMs);
   const response = await fetch(url, {
     ...init,
     redirect: 'manual',
     cache: 'no-store',
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(90_000)])
-      : AbortSignal.timeout(90_000),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  }).catch((error) => {
+    if (timeout.aborted && !signal?.aborted)
+      throw new AppError(
+        `Provider request exceeded ${timeoutMs / 1000} seconds.`,
+        504,
+        'timeout',
+      );
+    throw error;
   });
   if (!response.ok) {
-    // Never return raw provider errors: these can contain user code or credentials.
-    await response.body?.cancel();
+    // Classify bounded upstream text locally, but never return or log raw messages.
+    let contextError = false;
+    if ([400, 413, 422].includes(response.status)) {
+      try {
+        const detail = await readJson<{
+          error?: { code?: unknown; message?: unknown };
+        }>(response, 16000);
+        const reason = [detail.error?.code, detail.error?.message]
+          .filter((v) => typeof v === 'string')
+          .join(' ');
+        contextError =
+          /context[_ ]length|context[_ ]window|maximum.*context|input.*token.*limit|too many.*tokens/i.test(
+            reason,
+          );
+      } catch {
+        /* Preserve a safe HTTP-level error when the body is unreadable. */
+      }
+    } else await response.body?.cancel();
+    if (contextError)
+      throw new AppError(
+        'The provider rejected this request because it exceeds the model context limit. Choose a larger-context model.',
+        422,
+        'context_limit',
+      );
     if (response.status === 401 || response.status === 403)
       throw new AppError(
         'Access denied. Check your API key, provider, and model permissions.',

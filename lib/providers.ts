@@ -1,5 +1,6 @@
-import type { Provider } from './types';
+import type { Provider, ModelInfo, Usage } from './types';
 import { AppError, upstream, readJson } from './server';
+import { normalizeUsage } from './usage';
 
 type Part = {
   type?: string;
@@ -13,6 +14,18 @@ type Model = {
   display_name?: string;
   displayName?: string;
   supportedGenerationMethods?: string[];
+  context_length?: number;
+  inputTokenLimit?: number;
+  outputTokenLimit?: number;
+  max_input_tokens?: number;
+  max_tokens?: number;
+  top_provider?: { context_length?: number; max_completion_tokens?: number };
+  pricing?: {
+    prompt?: string;
+    completion?: string;
+    input_cache_read?: string;
+    request?: string;
+  };
   architecture?: { input_modalities?: string[]; output_modalities?: string[] };
 };
 type ProviderResponse = {
@@ -22,6 +35,7 @@ type ProviderResponse = {
   last_id?: string;
   nextPageToken?: string;
   status?: string;
+  incomplete_details?: { reason?: string };
   stop_reason?: string;
   error?: { code?: number };
   choices?: {
@@ -64,7 +78,7 @@ export async function listModels(
     );
     await validation.body?.cancel();
   }
-  const models: { id: string; name: string }[] = [];
+  const models: ModelInfo[] = [];
   let cursor = '';
   for (let page = 0; page < 20; page++) {
     const query =
@@ -88,7 +102,36 @@ export async function listModels(
           m.architecture?.input_modalities?.includes('text') &&
           m.architecture.output_modalities?.includes('text')
         ) {
-          models.push({ id: m.id, name: m.name || m.id });
+          const info: ModelInfo = { id: m.id, name: m.name || m.id };
+          const context = m.top_provider?.context_length || m.context_length;
+          if (context && context > 0) info.contextWindow = context;
+          if (
+            m.top_provider?.max_completion_tokens &&
+            m.top_provider.max_completion_tokens > 0
+          )
+            info.outputLimit = m.top_provider.max_completion_tokens;
+          const input =
+              m.pricing?.prompt == null ? NaN : Number(m.pricing.prompt),
+            output =
+              m.pricing?.completion == null
+                ? NaN
+                : Number(m.pricing.completion);
+          if (
+            Number.isFinite(input) &&
+            input >= 0 &&
+            Number.isFinite(output) &&
+            output >= 0
+          ) {
+            info.pricing = { input, output };
+            if (
+              m.pricing?.input_cache_read != null &&
+              Number(m.pricing.input_cache_read) >= 0
+            )
+              info.pricing.cachedInput = Number(m.pricing.input_cache_read);
+            if (m.pricing?.request != null && Number(m.pricing.request) >= 0)
+              info.pricing.request = Number(m.pricing.request);
+          }
+          models.push(info);
         }
       } else if (provider === 'gemini') {
         if (
@@ -98,6 +141,8 @@ export async function listModels(
           models.push({
             id: m.name.replace(/^models\//, ''),
             name: m.displayName || m.name,
+            ...(m.inputTokenLimit ? { inputLimit: m.inputTokenLimit } : {}),
+            ...(m.outputTokenLimit ? { outputLimit: m.outputTokenLimit } : {}),
           });
       } else if (
         provider === 'anthropic' ||
@@ -105,7 +150,12 @@ export async function listModels(
           !/audio|realtime|transcrib|image|tts|search|instruct/.test(m.id) &&
           !/^(gpt-3|gpt-4(?:-|$)|o1-mini|o1-preview|chatgpt-)/.test(m.id))
       ) {
-        models.push({ id: m.id, name: m.display_name || m.id });
+        models.push({
+          id: m.id,
+          name: m.display_name || m.id,
+          ...(m.max_input_tokens ? { inputLimit: m.max_input_tokens } : {}),
+          ...(m.max_tokens ? { outputLimit: m.max_tokens } : {}),
+        });
       }
     }
     cursor =
@@ -131,25 +181,58 @@ export async function generate(
   model: string,
   prompt: string,
   signal?: AbortSignal,
+  options: {
+    metadata?: Partial<ModelInfo>;
+    onUsage?: (usage: Usage) => void;
+    maxOutput?: number;
+  } = {},
 ): Promise<string> {
+  const metadata = options.metadata || {};
+  let outputCap = Math.min(
+    options.maxOutput ?? 12000,
+    metadata.outputLimit ?? 12000,
+  );
+  const estimatedInput = Math.ceil(new TextEncoder().encode(prompt).length / 3);
+  if (metadata.inputLimit && estimatedInput > metadata.inputLimit)
+    throw new AppError(
+      'Estimated input exceeds the model input limit. Choose a larger-context model.',
+      422,
+      'context_limit',
+    );
+  if (metadata.contextWindow)
+    outputCap = Math.min(
+      outputCap,
+      metadata.contextWindow - estimatedInput - 512,
+    );
+  if (outputCap < 256)
+    throw new AppError(
+      'Estimated context capacity is too small for this request. Choose a larger-context model.',
+      422,
+      'context_limit',
+    );
   let endpoint: string;
   let payload: Record<string, unknown>;
   if (provider === 'openai') {
     endpoint = '/responses';
-    payload = { model, input: prompt, max_output_tokens: 12000, store: false };
+    payload = {
+      model,
+      input: prompt,
+      max_output_tokens: outputCap,
+      store: false,
+    };
   } else if (provider === 'openrouter') {
     endpoint = '/chat/completions';
     payload = {
       model,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 8192,
+      max_tokens: outputCap,
       stream: false,
     };
   } else if (provider === 'anthropic') {
     endpoint = '/messages';
     payload = {
       model,
-      max_tokens: 8192,
+      max_tokens: outputCap,
       messages: [{ role: 'user', content: prompt }],
     };
   } else {
@@ -158,7 +241,7 @@ export async function generate(
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
         responseMimeType: 'application/json',
-        maxOutputTokens: 12000,
+        maxOutputTokens: outputCap,
       },
     };
   }
@@ -170,14 +253,55 @@ export async function generate(
       body: JSON.stringify(payload),
     },
     signal,
+    180_000,
   );
   const data = await readJson<ProviderResponse>(r);
+  const rawReason =
+    provider === 'openai'
+      ? data.incomplete_details?.reason || data.status || 'completed'
+      : provider === 'anthropic'
+        ? data.stop_reason
+        : provider === 'openrouter'
+          ? data.choices?.[0]?.finish_reason
+          : data.candidates?.[0]?.finishReason;
+  const finishReason =
+    typeof rawReason === 'string' && /^[a-zA-Z_]+$/.test(rawReason)
+      ? rawReason
+      : 'unknown';
+  const usage = normalizeUsage(
+    provider,
+    model,
+    data,
+    metadata,
+    outputCap,
+    finishReason,
+  );
+  options.onUsage?.(usage);
+  console.info(
+    JSON.stringify({
+      event: 'generation',
+      time: new Date().toISOString(),
+      provider,
+      ...usage,
+    }),
+  );
   let text = '';
   if (provider === 'openai') {
+    if (
+      data.status === 'incomplete' &&
+      data.incomplete_details?.reason &&
+      data.incomplete_details.reason !== 'max_output_tokens'
+    )
+      throw new AppError(
+        'The provider stopped the response before completion.',
+        422,
+        'provider_incomplete',
+      );
     if (data.status === 'incomplete')
       throw new AppError(
-        'The model ran out of output space. Try another model or a smaller file.',
+        `The model reached its ${outputCap.toLocaleString()}-token output cap (including reasoning). Try a smaller section or another model.`,
         422,
+        'output_limit',
       );
     text = (data.output || [])
       .flatMap((x: Part) => x.content || [])
@@ -193,8 +317,9 @@ export async function generate(
       );
     if (choice?.finish_reason === 'length')
       throw new AppError(
-        'The model ran out of output space. Try another model or a smaller file.',
+        `The model reached its ${outputCap.toLocaleString()}-token output cap (including reasoning). Try a smaller section or another model.`,
         422,
+        'output_limit',
       );
     if (choice?.finish_reason && choice.finish_reason !== 'stop')
       throw new AppError(
@@ -214,8 +339,9 @@ export async function generate(
   } else if (provider === 'anthropic') {
     if (data.stop_reason === 'max_tokens')
       throw new AppError(
-        'The model ran out of output space. Try another model or a smaller file.',
+        `The model reached its ${outputCap.toLocaleString()}-token output cap (including reasoning). Try a smaller section or another model.`,
         422,
+        'output_limit',
       );
     text = (data.content || [])
       .filter((x: Part) => x.type === 'text')
@@ -223,6 +349,12 @@ export async function generate(
       .join('');
   } else {
     const candidate = data.candidates?.[0];
+    if (candidate?.finishReason === 'MAX_TOKENS')
+      throw new AppError(
+        `The model reached its ${outputCap.toLocaleString()}-token output cap (including reasoning). Try a smaller section or another model.`,
+        422,
+        'output_limit',
+      );
     if (candidate?.finishReason && candidate.finishReason !== 'STOP')
       throw new AppError(
         'The model did not complete its response. Try another model or a smaller file.',
